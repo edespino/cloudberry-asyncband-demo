@@ -55,12 +55,12 @@ Build `demo/` (can start as a copy of `trial/`).
 
 ## T6: Honest benchmark
 
-- [ ] Three paths on the same table and cluster:
+- [x] Three paths on the same table and cluster:
     1. Coordinator fetch.
     2. Parallel retrieve (this demo).
     3. The existing parallel file export path (gpfdist writable external table to the client host, or another parallel export the cluster supports). Ask Ed which one before building it.
-- [ ] Table sizes: at least 10M and 100M rows.
-- [ ] Write `bench/BENCH.md`: cluster spec, segment count, method, results table, anything odd. Plain writing, no dashes of the em or en kind.
+- [x] Table sizes: at least 10M and 100M rows.
+- [x] Write `bench/BENCH.md`: cluster spec, segment count, method, results table, anything odd. Plain writing, no dashes of the em or en kind.
 - Done when: BENCH.md is complete and reproducible from a script in `bench/`.
 - **STOP.** Ed reviews numbers against the kill criteria in docs/BACKGROUND.md.
 
