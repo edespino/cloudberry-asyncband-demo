@@ -20,7 +20,8 @@
 // Asyncband pieces exercised:
 //   Semaphore  caps how many retrieve sessions are open at once (MAX_OPEN)
 //   shutdown   any failing endpoint cancels all other streams; then ROLLBACK
-//              awaiting Shutdown at the end doubles as a leaked-stream check
+//              awaiting Shutdown at the end checks that every retrieve
+//              connection has closed (each connection task holds a guard)
 //
 // Env: CB_HOST CB_PORT CB_USER CB_PASSWORD CB_DB CB_QUERY MAX_OPEN
 //      FAIL_ENDPOINT=<index>  optional: drop that stream after its first batch
@@ -35,6 +36,7 @@ use tokio_postgres::{Config, NoTls, SimpleQueryMessage};
 
 const BATCH: usize = 10_000;
 const CURSOR: &str = "asyncband_demo";
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct Endpoint {
     host: String,
@@ -61,7 +63,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Coordinator session: holds the transaction for the whole run.
     let mut cfg = Config::new();
-    cfg.host(&host).port(port).user(&user).dbname(&db);
+    cfg.host(&host)
+        .port(port)
+        .user(&user)
+        .dbname(&db)
+        .connect_timeout(CONNECT_TIMEOUT);
     if let Some(p) = &password {
         cfg.password(p);
     }
@@ -75,7 +81,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let start = Instant::now();
     coord.simple_query("BEGIN").await?;
     coord
-        .simple_query(&format!("DECLARE {CURSOR} PARALLEL RETRIEVE CURSOR FOR {query}"))
+        .simple_query(&format!(
+            "DECLARE {CURSOR} PARALLEL RETRIEVE CURSOR FOR {query}"
+        ))
         .await?;
 
     let mut endpoints = Vec::new();
@@ -94,7 +102,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         }
     }
-    println!("{} endpoints, at most {max_open} open at once", endpoints.len());
+    println!(
+        "{} endpoints, at most {max_open} open at once",
+        endpoints.len()
+    );
 
     let sem = Arc::new(Semaphore::new(max_open));
     let (stop, guard) = shutdown::new();
@@ -110,10 +121,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let t0 = Instant::now();
             let result = retrieve(&ep, &db, &guard, fail_at == Some(i)).await;
             match &result {
-                Ok(n) => println!("endpoint {i} {}:{}  {n} rows in {:.2?}", ep.host, ep.port, t0.elapsed()),
+                Ok(n) => println!(
+                    "endpoint {i} {}:{}  {n} rows in {:.2?}",
+                    ep.host,
+                    ep.port,
+                    t0.elapsed()
+                ),
                 Err(e) if e == "cancelled" => println!("endpoint {i}  cancelled, session closed"),
                 Err(e) => {
-                    eprintln!("endpoint {i} {}:{}  FAILED: {e}; requesting shutdown", ep.host, ep.port);
+                    eprintln!(
+                        "endpoint {i} {}:{}  FAILED: {e}; requesting shutdown",
+                        ep.host, ep.port
+                    );
                     stop.request_shutdown();
                 }
             }
@@ -132,7 +151,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if failed {
-        coord.simple_query("ROLLBACK").await?;
+        // When a retrieve session quits early, Cloudberry cancels the cursor on
+        // the coordinator session. That error arrives as the reply to the next
+        // statement, so the first ROLLBACK can fail and a second one is needed.
+        if let Err(e) = coord.simple_query("ROLLBACK").await {
+            let msg = e.as_db_error().map(|d| d.message().to_string());
+            println!("coordinator: {}", msg.unwrap_or_else(|| e.to_string()));
+            coord.simple_query("ROLLBACK").await?;
+        }
         println!("rolled back after failure");
     } else {
         coord.simple_query(&format!("CLOSE {CURSOR}")).await?;
@@ -141,22 +167,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     match tokio::time::timeout(Duration::from_secs(5), stop).await {
-        Ok(()) => println!("all guards released, no leaked streams"),
-        Err(_) => println!("LEAK: a retrieve task never released its guard"),
+        Ok(()) => println!("all guards released, no leaked retrieve connections"),
+        Err(_) => println!("LEAK: a retrieve connection is still open after 5s"),
     }
     Ok(())
 }
 
-async fn retrieve(ep: &Endpoint, db: &str, guard: &ShutdownGuard, inject_fail: bool) -> Result<u64, String> {
+async fn retrieve(
+    ep: &Endpoint,
+    db: &str,
+    guard: &ShutdownGuard,
+    inject_fail: bool,
+) -> Result<u64, String> {
     let mut cfg = Config::new();
     cfg.host(&ep.host)
         .port(ep.port)
         .user(&ep.user)
         .password(&ep.token)
         .dbname(db)
-        .options("-c gp_retrieve_conn=true");
+        .options("-c gp_retrieve_conn=true")
+        .connect_timeout(CONNECT_TIMEOUT);
     let (client, conn) = cfg.connect(NoTls).await.map_err(|e| e.to_string())?;
+    // The connection task holds its own guard until the socket is closed, so
+    // the final leak check covers retrieve connections, not only the tasks.
+    let conn_guard = guard.clone();
     tokio::spawn(async move {
+        let _conn_guard = conn_guard;
         let _ = conn.await;
     });
 
@@ -167,7 +203,10 @@ async fn retrieve(ep: &Endpoint, db: &str, guard: &ShutdownGuard, inject_fail: b
             _ = guard.shutdown_requested() => return Err("cancelled".to_string()),
             r = client.simple_query(&sql) => r.map_err(|e| e.to_string())?,
         };
-        let n = msgs.iter().filter(|m| matches!(m, SimpleQueryMessage::Row(_))).count() as u64;
+        let n = msgs
+            .iter()
+            .filter(|m| matches!(m, SimpleQueryMessage::Row(_)))
+            .count() as u64;
         if n == 0 {
             return Ok(total);
         }

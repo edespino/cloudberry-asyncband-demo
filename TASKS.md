@@ -20,10 +20,10 @@ Prerequisites from Ed (ask if missing):
 
 `trial/` is a first pass written without compiling. Asyncband calls were checked against the 0.8.0 docs. tokio-postgres calls (`Config::options`, `simple_query`, `SimpleQueryRow::get`) were written from memory and are the likeliest compile fixes.
 
-- [ ] Point `trial/Cargo.toml` at the vendored RC crate (the directory holding asyncband's own Cargo.toml).
-- [ ] Make it compile. Fix only what is needed. Record any Asyncband API difference from 0.8.0 in `docs/UPSTREAM.md`.
-- [ ] Run happy path: all endpoints finish, total equals `SELECT count(*)`, leak check passes.
-- [ ] Run with `FAIL_ENDPOINT=2`: that stream fails, others report cancelled, coordinator rolls back, leak check passes, nothing hangs.
+- [x] Point `trial/Cargo.toml` at the vendored RC crate (the directory holding asyncband's own Cargo.toml).
+- [x] Make it compile. Fix only what is needed. Record any Asyncband API difference from 0.8.0 in `docs/UPSTREAM.md`.
+- [x] Run happy path: all endpoints finish, total equals `SELECT count(*)`, leak check passes.
+- [x] Run with `FAIL_ENDPOINT=2`: that stream fails, others report cancelled, coordinator rolls back, leak check passes, nothing hangs.
 - Done when: both runs behave as described. Paste outputs into `trial/RESULTS.md`.
 
 ## T2: Demo CLI skeleton
