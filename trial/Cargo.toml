@@ -1,0 +1,13 @@
+[package]
+name = "asyncband-cloudberry-trial"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+# Path to the crate inside the extracted 0.8.1 release candidate tarball,
+# so the trial exercises the exact source under vote. Adjust to wherever
+# asyncband's own Cargo.toml sits after extraction.
+asyncband = { path = "../vendor/apache-asyncband-0.8.1-incubating-src/asyncband", features = ["semaphore", "shutdown"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tokio-postgres = "0.7"
