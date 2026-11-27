@@ -42,9 +42,9 @@ Build `demo/` (can start as a copy of `trial/`).
 
 ## T4: The race visuals
 
-- [ ] Parallel mode: one progress bar per segment, updating live (use an existing progress bar crate; verify its API).
-- [ ] Coordinator mode: one bar.
-- [ ] Side-by-side or back-to-back run script, `demo/race.sh`, ending with one comparison line: times and speedup.
+- [x] Parallel mode: one progress bar per segment, updating live (use an existing progress bar crate; verify its API).
+- [x] Coordinator mode: one bar.
+- [x] Side-by-side or back-to-back run script, `demo/race.sh`, ending with one comparison line: times and speedup.
 - Done when: the race is readable in a standard terminal and finishes cleanly.
 
 ## T5: The failure act

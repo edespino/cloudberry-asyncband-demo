@@ -41,6 +41,7 @@ use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use asyncband::semaphore::Semaphore;
 use asyncband::shutdown::{self, ShutdownGuard};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
@@ -185,6 +186,14 @@ async fn layout_of(coord: &Client, query: &str) -> Result<Layout, AnyError> {
     })
 }
 
+/// One line per stream: label, bar, rows so far, state.
+fn bar_style(color: &str) -> ProgressStyle {
+    let template = format!("{{prefix:<15}} {{bar:24.{color}}} {{human_pos:>11}}  {{msg}}");
+    ProgressStyle::with_template(&template)
+        .expect("bar template")
+        .progress_chars("##-")
+}
+
 /// out.parquet -> out.3.parquet
 fn part_path(to: &Path, i: usize) -> PathBuf {
     to.with_extension(format!("{i}.parquet"))
@@ -269,9 +278,9 @@ async fn main() -> Result<(), AnyError> {
 
     let start = Instant::now();
     let rows = if mode == "coordinator" {
-        run_coordinator(&coord, &query, out).await?
+        run_coordinator(&coord, &query, expected, out).await?
     } else {
-        run_parallel(&coord, &query, &db, out).await?
+        run_parallel(&coord, &query, &db, expected, out).await?
     };
     let secs = start.elapsed().as_secs_f64();
 
@@ -296,8 +305,12 @@ async fn main() -> Result<(), AnyError> {
 async fn run_coordinator(
     coord: &Client,
     query: &str,
+    expected: u64,
     out: Option<(PathBuf, Layout)>,
 ) -> Result<Option<u64>, AnyError> {
+    let bar = ProgressBar::new(expected).with_style(bar_style("cyan"));
+    bar.set_prefix("coordinator");
+    let t0 = Instant::now();
     let mut sink = match &out {
         Some((path, layout)) => Some(Sink::create(path, layout)?),
         None => None,
@@ -320,7 +333,9 @@ async fn run_coordinator(
             s.write(&msgs)?;
         }
         total += n;
+        bar.inc(n);
     }
+    bar.finish_with_message(format!("{:.2}s", t0.elapsed().as_secs_f64()));
     step(coord, &format!("CLOSE {CURSOR}")).await?;
     step(coord, "COMMIT").await?;
     if let (Some(s), Some((path, _))) = (sink, &out) {
@@ -336,6 +351,7 @@ async fn run_parallel(
     coord: &Client,
     query: &str,
     db: &str,
+    expected: u64,
     out: Option<(PathBuf, Layout)>,
 ) -> Result<Option<u64>, AnyError> {
     let max_open: usize = env_or("MAX_OPEN", "64").parse()?;
@@ -351,7 +367,7 @@ async fn run_parallel(
     let mut endpoints = Vec::new();
     let sql = format!(
         "SELECT hostname, port, auth_token, endpointname, username \
-         FROM gp_endpoints WHERE cursorname = '{CURSOR}'"
+         FROM gp_endpoints WHERE cursorname = '{CURSOR}' ORDER BY gp_segment_id"
     );
     for msg in step(coord, &sql).await? {
         if let SimpleQueryMessage::Row(r) = msg {
@@ -373,6 +389,13 @@ async fn run_parallel(
         None => Vec::new(),
     };
 
+    // One bar per endpoint. Each segment's share is not known in advance, so
+    // a bar starts at an even split and is set to the real count when it ends.
+    // With no terminal the bars are hidden and plain lines are printed instead.
+    let bars = MultiProgress::new();
+    let plain = bars.is_hidden();
+    let share = expected / endpoints.len().max(1) as u64;
+
     let sem = Arc::new(Semaphore::new(max_open));
     let (stop, guard) = shutdown::new();
     let mut tasks = Vec::new();
@@ -382,31 +405,47 @@ async fn run_parallel(
         let part = out
             .as_ref()
             .map(|(_, layout)| (parts[i].clone(), layout.clone()));
+        let bar = bars.add(ProgressBar::new(share).with_style(bar_style("cyan")));
+        bar.set_prefix(format!("seg{i} {}:{}", ep.host, ep.port));
+        bar.set_message("waiting for a permit");
         tasks.push(tokio::spawn(async move {
             let queued = Instant::now();
             let _permit = sem.acquire_owned(1).await;
-            let waited = queued.elapsed();
+            let waited = queued.elapsed().as_secs_f64();
             if guard.is_shutdown_requested() {
-                println!("endpoint {i}  never started");
+                bar.set_style(bar_style("yellow"));
+                bar.abandon_with_message("never started");
+                if plain {
+                    println!("endpoint {i}  never started");
+                }
                 return Err("never started".to_string());
             }
+            bar.set_message("retrieving");
             let t0 = Instant::now();
-            let result = retrieve(&ep, &db, &guard, fail_at == Some(i), part).await;
+            let result = retrieve(&ep, &db, &guard, fail_at == Some(i), part, &bar).await;
+            let took = t0.elapsed().as_secs_f64();
             match &result {
-                Ok(n) => println!(
-                    "endpoint {i} {}:{}  waited {:>5.2}s for a permit, then {n} rows in {:.2}s",
-                    ep.host,
-                    ep.port,
-                    waited.as_secs_f64(),
-                    t0.elapsed().as_secs_f64()
-                ),
-                Err(e) if e == "cancelled" => println!("endpoint {i}  cancelled, session closed"),
-                Err(e) => {
-                    eprintln!(
-                        "endpoint {i} {}:{}  FAILED: {e}; requesting shutdown",
-                        ep.host, ep.port
-                    );
+                Ok(n) => {
+                    bar.set_length(*n);
+                    bar.finish_with_message(format!("{took:.2}s, waited {waited:.2}s"));
+                    if plain {
+                        println!(
+                            "endpoint {i} {}:{}  waited {waited:>5.2}s for a permit, then {n} rows in {took:.2}s",
+                            ep.host, ep.port
+                        );
+                    }
+                }
+                Err(e) if e == "cancelled" => {
+                    bar.set_style(bar_style("yellow"));
+                    bar.abandon_with_message(format!("cancelled at {took:.2}s"));
+                    if plain {
+                        println!("endpoint {i}  cancelled, session closed");
+                    }
+                }
+                Err(_) => {
                     stop.request_shutdown();
+                    bar.set_style(bar_style("red"));
+                    bar.abandon_with_message("FAILED");
                 }
             }
             result
@@ -416,10 +455,15 @@ async fn run_parallel(
 
     let mut total = 0u64;
     let mut failed = false;
-    for t in tasks {
+    for (i, t) in tasks.into_iter().enumerate() {
         match t.await? {
             Ok(n) => total += n,
-            Err(_) => failed = true,
+            Err(e) => {
+                failed = true;
+                if e != "cancelled" && e != "never started" {
+                    println!("seg{i} FAILED: {e}; shutdown requested, other streams cancelled");
+                }
+            }
         }
     }
 
@@ -465,6 +509,7 @@ async fn retrieve(
     guard: &ShutdownGuard,
     inject_fail: bool,
     part: Option<(PathBuf, Layout)>,
+    bar: &ProgressBar,
 ) -> Result<u64, String> {
     let mut cfg = Config::new();
     cfg.host(&ep.host)
@@ -505,6 +550,7 @@ async fn retrieve(
             s.write(&msgs)?;
         }
         total += n;
+        bar.inc(n);
         if inject_fail {
             return Err("injected failure after first batch".to_string());
         }
