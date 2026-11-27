@@ -10,9 +10,9 @@ Prerequisites from Ed (ask if missing):
 
 ## T0: Python spike (prove the speedup before building Rust)
 
-- [ ] Load the demo table with `trial/setup.sql`. Confirm rows are spread evenly across segments.
-- [ ] Write `spike/spike.py` (psycopg, one thread per endpoint) that runs a parallel retrieve and, separately, a coordinator fetch of the same query using a regular cursor in batches.
-- [ ] Print row counts, wall time, rows per second for both. Row counts must match.
+- [x] Load the demo table with `trial/setup.sql`. Confirm rows are spread evenly across segments.
+- [x] Write `spike/spike.py` (psycopg, one thread per endpoint) that runs a parallel retrieve and, separately, a coordinator fetch of the same query using a regular cursor in batches.
+- [x] Print row counts, wall time, rows per second for both. Row counts must match.
 - Done when: both paths return identical counts; results written to `spike/RESULTS.md` with cluster size and segment count.
 - **STOP.** Ed decides whether the speedup justifies the Rust demo.
 
