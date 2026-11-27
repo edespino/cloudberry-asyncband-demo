@@ -206,7 +206,9 @@ async fn run_parallel(coord: &Client, query: &str, db: &str) -> Result<Option<u6
     for (i, ep) in endpoints.into_iter().enumerate() {
         let (sem, guard, stop, db) = (sem.clone(), guard.clone(), stop.clone(), db.to_string());
         tasks.push(tokio::spawn(async move {
+            let queued = Instant::now();
             let _permit = sem.acquire_owned(1).await;
+            let waited = queued.elapsed();
             if guard.is_shutdown_requested() {
                 println!("endpoint {i}  never started");
                 return Err("never started".to_string());
@@ -215,10 +217,11 @@ async fn run_parallel(coord: &Client, query: &str, db: &str) -> Result<Option<u6
             let result = retrieve(&ep, &db, &guard, fail_at == Some(i)).await;
             match &result {
                 Ok(n) => println!(
-                    "endpoint {i} {}:{}  {n} rows in {:.2?}",
+                    "endpoint {i} {}:{}  waited {:>5.2}s for a permit, then {n} rows in {:.2}s",
                     ep.host,
                     ep.port,
-                    t0.elapsed()
+                    waited.as_secs_f64(),
+                    t0.elapsed().as_secs_f64()
                 ),
                 Err(e) if e == "cancelled" => println!("endpoint {i}  cancelled, session closed"),
                 Err(e) => {
