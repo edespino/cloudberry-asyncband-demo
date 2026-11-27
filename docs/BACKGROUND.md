@@ -139,3 +139,21 @@ Verdict reached: not justified as a product yet; reasonable as a short, honest d
 - Tanzu Greenplum 7.8.2: https://support.broadcom.com/web/ecx/support-content-notification/-/external/content/SecurityAdvisories/0/37753
 - Cloudberry August 2026 report: https://cloudberry.apache.org/blog/apache-cloudberry-incubation-report-202608
 - Cloudberry 2025 review: https://cloudberry.apache.org/blog/apache-cloudberry-2025-review.md
+
+## 13. After the benchmark (November 27, 2026)
+
+Full numbers are in `bench/BENCH.md`.
+
+What the benchmark found, 100M rows, 8 segments on two hosts, client on a third machine:
+
+- Coordinator fetch 38.26 s. Parallel retrieve 7.64 s. gpfdist 6.13 s. COPY ON SEGMENT 3.87 s.
+- Parallel retrieve is 5 times faster than the coordinator fetch and 25 percent slower than gpfdist.
+- The kill criterion in section 7 ("stop if parallel retrieve does not clearly beat the existing parallel export path") is not met. Tuning the client and moving it to its own machine narrowed the gap from 70 percent to 25 percent and did not close it.
+- One retrieve stream runs at about 1.8M rows per second however many run beside it, and the client is not the busiest process in that stream. The limit looks to be on the server side of a retrieve session. Not proven.
+
+Decisions Ed made after seeing the numbers:
+
+- **Reframe the pitch.** Do not claim to beat the existing parallel export. The claim is: about 5 times faster than reading through the coordinator, which is what pandas, Polars, JDBC, and ConnectorX users get today, and within 25 percent of gpfdist with nothing to set up on the server. gpfdist needs a process on the client host, a writable external table, and segments that can connect back to the client. Parallel retrieve needs an ordinary login and outbound connections from the client to the segments. This replaces the pitch in section 6, item 6, and it is the framing for T7.
+- **Hold the Cloudberry mailing list question** about the per stream limit. Not now.
+- **No Asyncband follow-up** from this work. The notes in `docs/UPSTREAM.md` stay local.
+- **Do not start the ConnectorX source.** Unchanged from section 7.
