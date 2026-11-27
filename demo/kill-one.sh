@@ -23,7 +23,7 @@ for _ in $(seq 1 300); do
              WHERE query ILIKE 'retrieve%' AND pid <> pg_backend_pid() LIMIT 1")
     if [ -n "$pid" ]; then
         sleep "$delay"
-        q "SELECT 'terminated backend $pid on $host:$port', pg_terminate_backend($pid)"
+        q "SELECT 'terminated backend $pid on $host:$port' WHERE pg_terminate_backend($pid)"
         exit 0
     fi
     sleep 0.1

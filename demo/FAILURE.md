@@ -19,7 +19,7 @@ CB_QUERY='SELECT * FROM retrieve_demo_100m' FAIL_ENDPOINT=2 FAIL_AFTER=4000000 \
 On screen: the `seg2` bar turns red and says FAILED. The other seven bars turn yellow and say cancelled. Then:
 
 ```
-seg2 FAILED: injected failure after 4000000 rows; shutdown requested, other streams cancelled
+seg2 FAILED: injected failure after 4000000 rows
 all 7 other streams stopped 0 ms after the failure
 coordinator: canceling MPP operation: "Endpoint retrieve session is quitting. All unfinished parallel retrieve cursors on the session will be terminated."  (seg4 10.0.1.187:6000 pid=35703)
 rolled back after failure
@@ -41,18 +41,18 @@ Exact method:
 2. Find the retrieve session there: `SELECT pid FROM pg_stat_activity WHERE query ILIKE 'retrieve%' AND pid <> pg_backend_pid();`
 3. `SELECT pg_terminate_backend(<pid>);`
 
-`demo/kill-one.sh` does these three steps. It waits for a retrieve session to appear, lets it run for a few seconds, then terminates it:
+`demo/kill-one.sh` does these three steps. It waits for a retrieve session to appear, lets it run for a few seconds, then terminates it. `demo/failure.sh` starts it in the background and runs the export:
 
 ```
-demo/kill-one.sh sdw1 6001 3 &
-CB_QUERY='SELECT * FROM retrieve_demo_100m' \
-    demo/target/release/asyncband-cloudberry-demo --mode parallel
+CB_QUERY='SELECT * FROM retrieve_demo_100m' demo/failure.sh sdw1 6001 3
 ```
+
+When the client is not on a cluster host, set `KILL_FROM` to a cluster host that the client can reach over ssh. `failure.sh` then runs `kill-one.sh` there.
 
 On screen: the `seg5` bar turns red, the other seven turn yellow. Then:
 
 ```
-seg5 FAILED: connection closed; shutdown requested, other streams cancelled
+seg5 FAILED: connection closed
 all 7 other streams stopped 1 ms after the failure
 coordinator: canceling MPP operation: "Endpoint retrieve session is quitting. All unfinished parallel retrieve cursors on the session will be terminated."  (seg1 10.0.1.179:6001 pid=236128)
 rolled back after failure

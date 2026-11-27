@@ -66,8 +66,8 @@ Build `demo/` (can start as a copy of `trial/`).
 
 ## T7: Package the demo
 
-- [ ] `demo/README.md`: what it shows, how to run, requirements (segment reachability), limits (scan and filter queries only).
-- [ ] Record the race and the failure act as terminal recordings for talks, so a live failure on stage is never a risk.
+- [x] `demo/README.md`: what it shows, how to run, requirements (segment reachability), limits (scan and filter queries only).
+- [x] Record the race and the failure act as terminal recordings for talks, so a live failure on stage is never a risk.
 - **STOP.** Ed decides next step: publish results, ConnectorX source design, or stop.
 
 ## Not now (recorded so nobody builds it early)

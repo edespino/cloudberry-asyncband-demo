@@ -31,14 +31,18 @@
 //                             are read as they arrive either way. "all" is a
 //                             little faster but some streams start late and
 //                             a failure takes longer to act on.
+//      SUMMARY_FILE=<path>    optional: append "mode seconds rows streams" there
+//                             after a good run (race.sh reads it)
 //      FAIL_ENDPOINT=<index>  optional: drop that stream on purpose
 //      FAIL_AFTER=<rows>      optional: how many rows that stream reads first
 //                             (default: fail on the first rows that arrive)
 
 use std::env;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::exit;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -63,6 +67,9 @@ const CURSOR: &str = "asyncband_demo";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 // Longest wait for one statement on the coordinator, or for more rows on a stream.
 const STEP_TIMEOUT: Duration = Duration::from_secs(120);
+
+// How many streams the run used, for the summary line. Not coordination.
+static STREAMS: AtomicUsize = AtomicUsize::new(1);
 
 type AnyError = Box<dyn std::error::Error>;
 
@@ -382,6 +389,11 @@ async fn main() -> Result<(), AnyError> {
     );
     if rows == expected {
         println!("row count matches count(*) = {expected}");
+        if let Ok(path) = env::var("SUMMARY_FILE") {
+            let mut f = OpenOptions::new().create(true).append(true).open(path)?;
+            let streams = STREAMS.load(Ordering::Relaxed);
+            writeln!(f, "{mode} {secs:.2} {rows} {streams}")?;
+        }
         Ok(())
     } else {
         println!("ROW COUNT MISMATCH: count(*) = {expected}");
@@ -467,6 +479,7 @@ async fn run_parallel(
         "{} endpoints, at most {max_open} open at once",
         endpoints.len()
     );
+    STREAMS.store(endpoints.len(), Ordering::Relaxed);
     let parts: Vec<PathBuf> = match &out {
         Some((to, _)) => (0..endpoints.len()).map(|i| part_path(to, i)).collect(),
         None => Vec::new(),
@@ -548,7 +561,7 @@ async fn run_parallel(
             Err(e) => {
                 failed = true;
                 if e != "cancelled" && e != "never started" {
-                    println!("seg{i} FAILED: {e}; shutdown requested, other streams cancelled");
+                    println!("seg{i} FAILED: {e}");
                 }
             }
         }

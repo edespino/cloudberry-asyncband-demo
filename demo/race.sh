@@ -10,22 +10,18 @@ set -euo pipefail
 
 BIN=${BIN:-"$(dirname "$0")/target/release/asyncband-cloudberry-demo"}
 LIMIT=${RACE_TIMEOUT:-900}
-log=$(mktemp)
-trap 'rm -f "$log"' EXIT
+summary=$(mktemp)
+trap 'rm -f "$summary"' EXIT
+export SUMMARY_FILE=$summary
 
-run() {
+# The binary writes straight to the terminal so its bars and lines stay in
+# order. The times for the last line come from the summary file it appends to.
+for mode in coordinator parallel; do
     echo
-    timeout "$LIMIT" "$BIN" --mode "$1" | tee "$log"
-}
-seconds() { sed -n 's/^[0-9]* rows in \([0-9.]*\)s.*/\1/p' "$log"; }
-
-run coordinator
-coord=$(seconds)
-run parallel
-par=$(seconds)
-segments=$(sed -n 's/^\([0-9]*\) endpoints.*/\1/p' "$log")
+    timeout "$LIMIT" "$BIN" --mode "$mode"
+done
 
 echo
-awk -v c="$coord" -v p="$par" -v n="$segments" 'BEGIN {
+awk 'NR == 1 { c = $2 } NR == 2 { p = $2; n = $4 } END {
     printf "coordinator %.2fs, parallel %.2fs across %d segments: %.1fx faster\n", c, p, n, c / p
-}'
+}' "$summary"
