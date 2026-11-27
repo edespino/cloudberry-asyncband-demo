@@ -30,8 +30,8 @@ Prerequisites from Ed (ask if missing):
 
 Build `demo/` (can start as a copy of `trial/`).
 
-- [ ] One binary, two modes: `--mode coordinator` (regular cursor, batched FETCH through the coordinator) and `--mode parallel` (parallel retrieve, Asyncband coordination).
-- [ ] Same query, same row count check in both modes.
+- [x] One binary, two modes: `--mode coordinator` (regular cursor, batched FETCH through the coordinator) and `--mode parallel` (parallel retrieve, Asyncband coordination).
+- [x] Same query, same row count check in both modes.
 - Done when: both modes run on the demo table and counts match.
 
 ## T3: Parquet output and Polars check
