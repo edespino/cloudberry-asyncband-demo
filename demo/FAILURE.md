@@ -14,7 +14,7 @@ CB_QUERY='SELECT * FROM retrieve_demo_100m' FAIL_ENDPOINT=2 FAIL_AFTER=4000000 \
 ```
 
 - `FAIL_ENDPOINT` is the bar number (`seg2`).
-- `FAIL_AFTER` is how many rows that stream reads first. Without it the stream fails after one batch, which is too fast to see.
+- `FAIL_AFTER` is how many rows that stream reads first. Without it the stream fails on the first rows that arrive, which is too fast to see.
 
 On screen: the `seg2` bar turns red and says FAILED. The other seven bars turn yellow and say cancelled. Then:
 
@@ -76,6 +76,12 @@ Requirements: run it as the database owner from a cluster host. A utility mode s
 ## What Cloudberry does here
 
 When a retrieve session ends before its endpoint is finished, Cloudberry cancels the whole parallel retrieve cursor on the coordinator session. The coordinator reports that as an error (SQLSTATE 25M01) on the next statement the client sends. So the first `ROLLBACK` fails with that message and the client sends `ROLLBACK` again. The `coordinator:` line on screen is that message.
+
+## After the client was tuned
+
+The client now reads rows as they arrive and closes a stopped stream's socket at once (see `bench/BENCH.md`). The checks above were repeated on that build with 100M rows: ten injected failures in a row all exited 1 in 36 s total, and three server side terminations on three segments each cancelled the other seven streams within 2 ms and exited 1. Nothing was left on the server.
+
+With `BATCH=all` a failure on a stream on the client's own host takes about twice as long to show. The default batch of 100,000 rows does not have this problem.
 
 ## Not tested
 

@@ -27,9 +27,13 @@
 //              Shutdown at the end checks every retrieve connection closed
 //
 // Env: CB_HOST CB_PORT CB_USER CB_PASSWORD CB_DB CB_QUERY MAX_OPEN
+//      BATCH=<rows>|all       rows per RETRIEVE or FETCH (default 100000). Rows
+//                             are read as they arrive either way. "all" is a
+//                             little faster but some streams start late and
+//                             a failure takes longer to act on.
 //      FAIL_ENDPOINT=<index>  optional: drop that stream on purpose
 //      FAIL_AFTER=<rows>      optional: how many rows that stream reads first
-//                             (default: one batch)
+//                             (default: fail on the first rows that arrive)
 
 use std::env;
 use std::fs::{self, File};
@@ -43,6 +47,7 @@ use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use asyncband::semaphore::Semaphore;
 use asyncband::shutdown::{self, ShutdownGuard};
+use futures_util::StreamExt;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
@@ -51,10 +56,12 @@ use tokio::time::timeout;
 use tokio_postgres::types::Type;
 use tokio_postgres::{Client, Config, NoTls, SimpleQueryMessage};
 
-const BATCH: usize = 10_000;
+// Rows taken from the socket per wakeup, and rows per Parquet record batch.
+const CHUNK: usize = 4096;
+const WRITE_ROWS: usize = 10_000;
 const CURSOR: &str = "asyncband_demo";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-// Longest wait for one statement on the coordinator or one batch from a segment.
+// Longest wait for one statement on the coordinator, or for more rows on a stream.
 const STEP_TIMEOUT: Duration = Duration::from_secs(120);
 
 type AnyError = Box<dyn std::error::Error>;
@@ -221,10 +228,85 @@ async fn step(client: &Client, sql: &str) -> Result<Vec<SimpleQueryMessage>, Any
     }
 }
 
-fn count_rows(msgs: &[SimpleQueryMessage]) -> u64 {
-    msgs.iter()
-        .filter(|m| matches!(m, SimpleQueryMessage::Row(_)))
-        .count() as u64
+/// Prefer the server's own words, such as "terminating connection due to
+/// administrator command", over the generic "db error".
+fn pg_text(e: tokio_postgres::Error) -> String {
+    match e.as_db_error() {
+        Some(db) => db.message().to_string(),
+        None => e.to_string(),
+    }
+}
+
+/// Run one row returning command to its end, reading rows as they arrive.
+/// `command` gets the row count to ask for: "ALL", or a number when BATCH is
+/// set, in which case the command repeats until it returns nothing.
+/// Stops early with "cancelled" when shutdown is requested.
+async fn drain(
+    client: &Client,
+    command: impl Fn(&str) -> String,
+    batch: Option<u64>,
+    guard: &ShutdownGuard,
+    mut sink: Option<&mut Sink>,
+    bar: &ProgressBar,
+    inject_fail: Option<u64>,
+) -> Result<u64, String> {
+    let sql = command(&batch.map_or("ALL".to_string(), |n| n.to_string()));
+    let cancelled = guard.shutdown_requested();
+    tokio::pin!(cancelled);
+    let mut pending: Vec<SimpleQueryMessage> = Vec::new();
+    let mut total = 0u64;
+    loop {
+        let stream = tokio::select! {
+            _ = &mut cancelled => return Err("cancelled".to_string()),
+            r = timeout(STEP_TIMEOUT, client.simple_query_raw(&sql)) => match r {
+                Ok(r) => r.map_err(pg_text)?,
+                Err(_) => return Err(format!("no reply within {STEP_TIMEOUT:?}")),
+            },
+        };
+        let mut chunks = std::pin::pin!(stream.ready_chunks(CHUNK));
+        let mut got = 0u64;
+        loop {
+            let chunk = tokio::select! {
+                _ = &mut cancelled => return Err("cancelled".to_string()),
+                c = timeout(STEP_TIMEOUT, chunks.next()) => match c {
+                    Ok(Some(c)) => c,
+                    Ok(None) => break,
+                    Err(_) => return Err(format!("no rows within {STEP_TIMEOUT:?}")),
+                },
+            };
+            let mut n = 0u64;
+            for item in chunk {
+                let msg = item.map_err(pg_text)?;
+                if matches!(msg, SimpleQueryMessage::Row(_)) {
+                    n += 1;
+                    if sink.is_some() {
+                        pending.push(msg);
+                    }
+                }
+            }
+            if let Some(s) = sink.as_deref_mut() {
+                if pending.len() >= WRITE_ROWS {
+                    s.write(&pending)?;
+                    pending.clear();
+                }
+            }
+            got += n;
+            total += n;
+            bar.inc(n);
+            if inject_fail.is_some_and(|after| total >= after) {
+                return Err(format!("injected failure after {total} rows"));
+            }
+        }
+        if batch.is_none() || got == 0 {
+            break;
+        }
+    }
+    if let Some(s) = sink {
+        if !pending.is_empty() {
+            s.write(&pending)?;
+        }
+    }
+    Ok(total)
 }
 
 #[tokio::main]
@@ -247,6 +329,10 @@ async fn main() -> Result<(), AnyError> {
     let password = env::var("CB_PASSWORD").ok().filter(|p| !p.is_empty());
     let db = env_or("CB_DB", "postgres");
     let query = env_or("CB_QUERY", "SELECT * FROM retrieve_demo");
+    let batch: Option<u64> = match env_or("BATCH", "100000").as_str() {
+        "all" => None,
+        n => Some(n.parse()?),
+    };
 
     // Coordinator session. In parallel mode it holds the transaction for the run.
     let mut cfg = Config::new();
@@ -280,9 +366,9 @@ async fn main() -> Result<(), AnyError> {
 
     let start = Instant::now();
     let rows = if mode == "coordinator" {
-        run_coordinator(&coord, &query, expected, out).await?
+        run_coordinator(&coord, &query, batch, expected, out).await?
     } else {
-        run_parallel(&coord, &query, &db, expected, out).await?
+        run_parallel(&coord, &query, &db, batch, expected, out).await?
     };
     let secs = start.elapsed().as_secs_f64();
 
@@ -307,6 +393,7 @@ async fn main() -> Result<(), AnyError> {
 async fn run_coordinator(
     coord: &Client,
     query: &str,
+    batch: Option<u64>,
     expected: u64,
     out: Option<(PathBuf, Layout)>,
 ) -> Result<Option<u64>, AnyError> {
@@ -323,20 +410,10 @@ async fn run_coordinator(
         &format!("DECLARE {CURSOR} NO SCROLL CURSOR FOR {query}"),
     )
     .await?;
-    let fetch = format!("FETCH {BATCH} FROM {CURSOR}");
-    let mut total = 0u64;
-    loop {
-        let msgs = step(coord, &fetch).await?;
-        let n = count_rows(&msgs);
-        if n == 0 {
-            break;
-        }
-        if let Some(s) = sink.as_mut() {
-            s.write(&msgs)?;
-        }
-        total += n;
-        bar.inc(n);
-    }
+    // Nothing requests this shutdown. The coordinator path has one stream.
+    let (_stop, guard) = shutdown::new();
+    let fetch = |n: &str| format!("FETCH {n} FROM {CURSOR}");
+    let total = drain(coord, fetch, batch, &guard, sink.as_mut(), &bar, None).await?;
     bar.finish_with_message(format!("{:.2}s", t0.elapsed().as_secs_f64()));
     step(coord, &format!("CLOSE {CURSOR}")).await?;
     step(coord, "COMMIT").await?;
@@ -353,6 +430,7 @@ async fn run_parallel(
     coord: &Client,
     query: &str,
     db: &str,
+    batch: Option<u64>,
     expected: u64,
     out: Option<(PathBuf, Layout)>,
 ) -> Result<Option<u64>, AnyError> {
@@ -429,7 +507,7 @@ async fn run_parallel(
             }
             bar.set_message("retrieving");
             let t0 = Instant::now();
-            let result = retrieve(&ep, &db, &guard, inject, part, &bar).await;
+            let result = retrieve(&ep, &db, batch, &guard, inject, part, &bar).await;
             let took = t0.elapsed().as_secs_f64();
             match &result {
                 Ok(n) => {
@@ -522,6 +600,7 @@ async fn run_parallel(
 async fn retrieve(
     ep: &Endpoint,
     db: &str,
+    batch: Option<u64>,
     guard: &ShutdownGuard,
     inject_fail: Option<u64>,
     part: Option<(PathBuf, Layout)>,
@@ -539,7 +618,7 @@ async fn retrieve(
     // The connection task holds its own guard until the socket is closed, so
     // the final leak check covers retrieve connections, not only the tasks.
     let conn_guard = guard.clone();
-    tokio::spawn(async move {
+    let conn_task = tokio::spawn(async move {
         let _conn_guard = conn_guard;
         let _ = conn.await;
     });
@@ -548,34 +627,26 @@ async fn retrieve(
         None => None,
     };
 
-    let sql = format!("RETRIEVE {BATCH} FROM ENDPOINT {}", ep.name);
-    let mut total = 0u64;
-    loop {
-        let msgs = tokio::select! {
-            _ = guard.shutdown_requested() => return Err("cancelled".to_string()),
-            r = timeout(STEP_TIMEOUT, client.simple_query(&sql)) => match r {
-                // Prefer the server's own words, such as "terminating connection
-                // due to administrator command", over the generic "db error".
-                Ok(r) => r.map_err(|e| match e.as_db_error() {
-                    Some(db) => db.message().to_string(),
-                    None => e.to_string(),
-                })?,
-                Err(_) => return Err(format!("no batch within {STEP_TIMEOUT:?}")),
-            },
-        };
-        let n = count_rows(&msgs);
-        if n == 0 {
-            break;
+    let command = |n: &str| format!("RETRIEVE {n} FROM ENDPOINT {}", ep.name);
+    let drained = drain(
+        &client,
+        command,
+        batch,
+        guard,
+        sink.as_mut(),
+        bar,
+        inject_fail,
+    )
+    .await;
+    let total = match drained {
+        Ok(n) => n,
+        Err(e) => {
+            // Close the socket now. Left alone, the connection would keep
+            // reading the rest of an unfinished RETRIEVE before it shut down.
+            conn_task.abort();
+            return Err(e);
         }
-        if let Some(s) = sink.as_mut() {
-            s.write(&msgs)?;
-        }
-        total += n;
-        bar.inc(n);
-        if inject_fail.is_some_and(|after| total >= after) {
-            return Err(format!("injected failure after {total} rows"));
-        }
-    }
+    };
     if let Some(s) = sink {
         s.close()?;
     }
