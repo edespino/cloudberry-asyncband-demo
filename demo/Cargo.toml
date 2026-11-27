@@ -6,8 +6,11 @@ license = "Apache-2.0"
 publish = false
 
 [dependencies]
+arrow-array = "60.2.0"
+arrow-schema = "60.2.0"
 # The exact source under the 0.8.1 release vote. Pin a released version
 # (`=x.y.z`) once the vote closes.
 asyncband = { path = "../vendor/apache-asyncband-0.8.1-incubating-src/asyncband", features = ["semaphore", "shutdown"] }
+parquet = { version = "60.2.0", default-features = false, features = ["arrow", "snap"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 tokio-postgres = "0.7"

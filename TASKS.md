@@ -36,8 +36,8 @@ Build `demo/` (can start as a copy of `trial/`).
 
 ## T3: Parquet output and Polars check
 
-- [ ] `--to out.parquet` writes results with existing crates (verify the arrow and parquet crate APIs first). Parallel mode may write one file per segment if that is simpler; say so in output.
-- [ ] A two-line Python check reads the output with Polars and prints the row count.
+- [x] `--to out.parquet` writes results with existing crates (verify the arrow and parquet crate APIs first). Parallel mode may write one file per segment if that is simpler; say so in output.
+- [x] A two-line Python check reads the output with Polars and prints the row count.
 - Done when: Polars count equals the database count.
 
 ## T4: The race visuals
