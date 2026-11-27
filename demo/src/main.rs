@@ -27,13 +27,15 @@
 //              Shutdown at the end checks every retrieve connection closed
 //
 // Env: CB_HOST CB_PORT CB_USER CB_PASSWORD CB_DB CB_QUERY MAX_OPEN
-//      FAIL_ENDPOINT=<index>  optional: drop that stream after its first batch
+//      FAIL_ENDPOINT=<index>  optional: drop that stream on purpose
+//      FAIL_AFTER=<rows>      optional: how many rows that stream reads first
+//                             (default: one batch)
 
 use std::env;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::exit;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use arrow_array::builder::{BooleanBuilder, Float64Builder, Int64Builder, StringBuilder};
@@ -356,6 +358,9 @@ async fn run_parallel(
 ) -> Result<Option<u64>, AnyError> {
     let max_open: usize = env_or("MAX_OPEN", "64").parse()?;
     let fail_at: Option<usize> = env::var("FAIL_ENDPOINT").ok().and_then(|v| v.parse().ok());
+    let fail_after: u64 = env_or("FAIL_AFTER", "0").parse()?;
+    // When the first stream failed, to report how fast the others stopped.
+    let failed_at: Arc<OnceLock<Instant>> = Arc::new(OnceLock::new());
 
     step(coord, "BEGIN").await?;
     step(
@@ -402,6 +407,8 @@ async fn run_parallel(
 
     for (i, ep) in endpoints.into_iter().enumerate() {
         let (sem, guard, stop, db) = (sem.clone(), guard.clone(), stop.clone(), db.to_string());
+        let failed_at = failed_at.clone();
+        let inject = (fail_at == Some(i)).then_some(fail_after);
         let part = out
             .as_ref()
             .map(|(_, layout)| (parts[i].clone(), layout.clone()));
@@ -422,7 +429,7 @@ async fn run_parallel(
             }
             bar.set_message("retrieving");
             let t0 = Instant::now();
-            let result = retrieve(&ep, &db, &guard, fail_at == Some(i), part, &bar).await;
+            let result = retrieve(&ep, &db, &guard, inject, part, &bar).await;
             let took = t0.elapsed().as_secs_f64();
             match &result {
                 Ok(n) => {
@@ -443,6 +450,7 @@ async fn run_parallel(
                     }
                 }
                 Err(_) => {
+                    let _ = failed_at.set(Instant::now());
                     stop.request_shutdown();
                     bar.set_style(bar_style("red"));
                     bar.abandon_with_message("FAILED");
@@ -455,6 +463,7 @@ async fn run_parallel(
 
     let mut total = 0u64;
     let mut failed = false;
+    let streams = tasks.len();
     for (i, t) in tasks.into_iter().enumerate() {
         match t.await? {
             Ok(n) => total += n,
@@ -467,6 +476,13 @@ async fn run_parallel(
         }
     }
 
+    if let Some(at) = failed_at.get() {
+        println!(
+            "all {} other streams stopped {} ms after the failure",
+            streams - 1,
+            at.elapsed().as_millis()
+        );
+    }
     if failed {
         // When a retrieve session quits early, Cloudberry cancels the cursor on
         // the coordinator session. That error arrives as the reply to the next
@@ -507,7 +523,7 @@ async fn retrieve(
     ep: &Endpoint,
     db: &str,
     guard: &ShutdownGuard,
-    inject_fail: bool,
+    inject_fail: Option<u64>,
     part: Option<(PathBuf, Layout)>,
     bar: &ProgressBar,
 ) -> Result<u64, String> {
@@ -538,7 +554,12 @@ async fn retrieve(
         let msgs = tokio::select! {
             _ = guard.shutdown_requested() => return Err("cancelled".to_string()),
             r = timeout(STEP_TIMEOUT, client.simple_query(&sql)) => match r {
-                Ok(r) => r.map_err(|e| e.to_string())?,
+                // Prefer the server's own words, such as "terminating connection
+                // due to administrator command", over the generic "db error".
+                Ok(r) => r.map_err(|e| match e.as_db_error() {
+                    Some(db) => db.message().to_string(),
+                    None => e.to_string(),
+                })?,
                 Err(_) => return Err(format!("no batch within {STEP_TIMEOUT:?}")),
             },
         };
@@ -551,8 +572,8 @@ async fn retrieve(
         }
         total += n;
         bar.inc(n);
-        if inject_fail {
-            return Err("injected failure after first batch".to_string());
+        if inject_fail.is_some_and(|after| total >= after) {
+            return Err(format!("injected failure after {total} rows"));
         }
     }
     if let Some(s) = sink {

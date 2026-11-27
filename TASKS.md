@@ -49,8 +49,8 @@ Build `demo/` (can start as a copy of `trial/`).
 
 ## T5: The failure act
 
-- [ ] Client-side failure via `FAIL_ENDPOINT` shows on screen: failing bar turns red, others stop within a second, rollback message, leak check line.
-- [ ] Investigate a real server-side failure (for example terminating one retrieve session's backend from another session). Document the exact method in `demo/FAILURE.md`; implement only if reliable.
+- [x] Client-side failure via `FAIL_ENDPOINT` shows on screen: failing bar turns red, others stop within a second, rollback message, leak check line.
+- [x] Investigate a real server-side failure (for example terminating one retrieve session's backend from another session). Document the exact method in `demo/FAILURE.md`; implement only if reliable.
 - Done when: the failure run never hangs across 10 consecutive attempts.
 
 ## T6: Honest benchmark
